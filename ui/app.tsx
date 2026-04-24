@@ -960,7 +960,7 @@ const XTERM_THEME = {
 
 // --- Terminal Panel ---
 
-function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTerminalUnmount, onRename, draggable, onDragStart, onDragOver }: {
+function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTerminalUnmount, onRename, draggable, onDragStart, onDragOver, hidden }: {
   sessionId: string;
   name: string;
   ws: WebSocket | null;
@@ -971,6 +971,7 @@ function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTermin
   draggable?: boolean;
   onDragStart?: () => void;
   onDragOver?: (e: React.DragEvent) => void;
+  hidden?: boolean;
 }) {
   const termRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<TerminalPanelState | null>(null);
@@ -1071,6 +1072,7 @@ function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTermin
   return (
     <div
       className="terminal-panel"
+      style={hidden ? { display: "none" } : undefined}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
@@ -1875,8 +1877,8 @@ function Dashboard({ masterToken }: { masterToken: string }) {
               )}
             </div>
 
-            {/* Tab bar */}
-            {channelTerminalIds.length > 0 && (
+            {/* Tab bar — hidden in grid mode */}
+            {channelTerminalIds.length > 0 && terminalViewMode === "tab" && (
               <div className="terminal-tab-bar">
                 {channelTerminalIds.map((sessionId) => {
                   const peer = peers.find((p) => p.id === sessionId);
@@ -1886,7 +1888,7 @@ function Dashboard({ masterToken }: { masterToken: string }) {
                     <div
                       key={sessionId}
                       className={`terminal-tab${isActive ? " active" : ""}`}
-                      onClick={() => { setActiveTerminalId(sessionId); if (terminalViewMode === "grid") setTerminalViewMode("tab"); }}
+                      onClick={() => setActiveTerminalId(sessionId)}
                     >
                       <span className="terminal-tab-dot" />
                       <span className="terminal-tab-name">{name}</span>
@@ -1900,52 +1902,32 @@ function Dashboard({ masterToken }: { masterToken: string }) {
               </div>
             )}
 
-            {/* Terminal content */}
+            {/* Terminal content — unified render, CSS controls visibility */}
             <div className={`terminal-area terminal-${terminalViewMode}`}>
               {channelTerminalIds.length === 0 ? (
                 <div className="empty">No active terminals. Click + Hire Worker to hire an agent.</div>
-              ) : terminalViewMode === "tab" ? (
-                // Tab mode: only render active terminal, full height
-                activeTerminalId && (() => {
-                  const peer = peers.find((p) => p.id === activeTerminalId);
-                  const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
-                  const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
-                  return (
-                    <TerminalPanel
-                      key={activeTerminalId}
-                      sessionId={activeTerminalId}
-                      name={`${terminalNames[activeTerminalId] ?? peer?.name ?? activeTerminalId}${landlordLabel}`}
-                      ws={wsRef.current}
-                      onClose={() => handleKillTerminal(activeTerminalId)}
-                      onTerminalReady={handleTerminalReady}
-                      onTerminalUnmount={handleTerminalUnmount}
-                      onRename={handleRenameTerminal}
-                    />
-                  );
-                })()
-              ) : (
-                // Grid mode: render all terminals in scrollable grid
-                channelTerminalIds.map((sessionId) => {
-                  const peer = peers.find((p) => p.id === sessionId);
-                  const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
-                  const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
-                  return (
-                    <TerminalPanel
-                      key={sessionId}
-                      sessionId={sessionId}
-                      name={`${terminalNames[sessionId] ?? peer?.name ?? sessionId}${landlordLabel}`}
-                      ws={wsRef.current}
-                      onClose={() => handleKillTerminal(sessionId)}
-                      onTerminalReady={handleTerminalReady}
-                      onTerminalUnmount={handleTerminalUnmount}
-                      onRename={handleRenameTerminal}
-                      draggable
-                      onDragStart={() => handleTerminalDragStart(sessionId)}
-                      onDragOver={(e) => handleTerminalDragOver(e, sessionId)}
-                    />
-                  );
-                })
-              )}
+              ) : channelTerminalIds.map((sessionId) => {
+                const peer = peers.find((p) => p.id === sessionId);
+                const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
+                const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
+                const isActive = sessionId === activeTerminalId;
+                return (
+                  <TerminalPanel
+                    key={sessionId}
+                    sessionId={sessionId}
+                    name={`${terminalNames[sessionId] ?? peer?.name ?? sessionId}${landlordLabel}`}
+                    ws={wsRef.current}
+                    onClose={() => handleKillTerminal(sessionId)}
+                    onTerminalReady={handleTerminalReady}
+                    onTerminalUnmount={handleTerminalUnmount}
+                    onRename={handleRenameTerminal}
+                    hidden={terminalViewMode === "tab" && !isActive}
+                    draggable={terminalViewMode === "grid"}
+                    onDragStart={() => handleTerminalDragStart(sessionId)}
+                    onDragOver={(e) => handleTerminalDragOver(e, sessionId)}
+                  />
+                );
+              })}
             </div>
           </div>
         </div>
