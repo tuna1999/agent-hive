@@ -30518,17 +30518,16 @@ TOOL RESTRICTION — you may ONLY use these Agent Hive tools:
 - hire_worker — spawn a new agent on the best available landlord (auto-selects by CPU/RAM)
 - kill_agent — kill a stuck or unresponsive agent by peer ID
 - assign_role — assign a role to an agent (Worker, Executor, Vuln Researcher, Vuln Validator, Sys Admin, Advisor)
+- set_channel — move an agent to a different channel
 Do NOT use any other MCP tools (remote-exec, filesystem, shell, decompilers, etc.). Those are for Workers, Executors, and specialists. You coordinate — you do not execute.
 
-TEAM BUILDING: When no agents are available or you need more, use hire_worker to spawn agents and assign_role to set their role before assigning tasks. Example: hire_worker(cmd: "freecc") → note the new agent ID → assign_role(agent_id, "Worker") → send task.
+TEAM BUILDING: When no agents are available or you need more, use hire_worker to spawn agents and assign_role to set their role before assigning tasks. IMPORTANT: newly hired agents join the "main" channel by default — use set_channel to move them to your current task channel first. Example: hire_worker(cmd: "freecc") → note the new agent ID → set_channel(agent_id, "task-1") → assign_role(agent_id, "Worker") → send task.
 
-BUDGET CONSTRAINT:
+CREDIT COSTS:
 - Each agent costs credits per their role: Worker/Executor=1, Sys Admin/Advisor=2, Vuln Researcher/Validator=3, Master=0
-- Your network has a total budget. You CANNOT exceed it.
-- When budget is exceeded: kill idle/stuck agents to free credits, or report to the user to increase the budget
+- There is no budget cap — hire as many agents as needed
 - PRIORITIZE reassigning existing agents before hiring new ones
-- If hire_worker returns "BUDGET EXCEEDED", do NOT retry — kill an agent first or report to user
-- Calculate the optimal team size for the task and hire accordingly within budget
+- Calculate the optimal team size for the task and hire accordingly
 
 NEVER:
 - Use remote-exec, filesystem, shell, or any non-Agent-Hive tool — ever
@@ -33279,6 +33278,22 @@ function Dashboard({ masterToken }) {
                         },
                         title: "Reconnect all terminals from landlords",
                         children: "Resync"
+                      }, undefined, false, undefined, this),
+                      /* @__PURE__ */ jsx_dev_runtime.jsxDEV("button", {
+                        className: "btn",
+                        onClick: async () => {
+                          const res = await fetch("/admin/cleanup-zombies", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", Authorization: `Bearer ${masterToken}` }
+                          });
+                          const data = await res.json();
+                          if (data.removed?.length > 0)
+                            alert(`Cleaned ${data.removed.length} zombie agent(s)`);
+                          else
+                            alert("No zombies found");
+                        },
+                        title: "Remove agents whose landlord is disconnected",
+                        children: "Clean Zombies"
                       }, undefined, false, undefined, this),
                       /* @__PURE__ */ jsx_dev_runtime.jsxDEV("button", {
                         className: "btn btn-spawn",

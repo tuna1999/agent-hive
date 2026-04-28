@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
 
                 // Re-register running agents after reconnect
                 {
-                    let m = mgr.lock().await;
+                    let mut m = mgr.lock().await;
                     m.re_register_all().await;
                 }
 
@@ -279,13 +279,19 @@ async fn main() -> Result<()> {
                     reader_done.store(true, std::sync::atomic::Ordering::Relaxed);
                 });
 
-                // System stats reporter (every 5s)
+                // System stats reporter (every 5s) — also reports live agent IDs for zombie detection
                 let stats_tx = broker_tx.clone();
+                let stats_mgr = mgr.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                     loop {
                         interval.tick().await;
-                        let stats = stats::collect();
+                        let mut m = stats_mgr.lock().await;
+                        // Clean up dead agents first
+                        m.cleanup_dead();
+                        let agent_ids: Vec<String> = m.agents.keys().cloned().collect();
+                        let stats = stats::collect_with_agents(&agent_ids);
+                        drop(m);
                         let mut tx = stats_tx.lock().await;
                         tx.send(&stats).await;
                     }

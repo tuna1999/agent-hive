@@ -17,15 +17,19 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: agent-hive-landlord-windows-amd64.exe
+            ext: .exe
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: agent-hive-landlord-linux-amd64
+            ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: agent-hive-landlord-macos-amd64
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: agent-hive-landlord-macos-arm64
+            ext: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,14 +40,11 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Rename artifact
         shell: bash
-        run: |
-          cd bridge/target/${{ matrix.target }}/release
-          src=$(ls agent-hive-landlord* | head -1)
-          cp "$src" "${{ matrix.artifact }}"
+        run: cp "bridge/target/${{ matrix.target }}/release/agent-hive-landlord${{ matrix.ext }}" "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: bridge/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
 
   build-coworker:
     name: Coworker (${{ matrix.target }})
@@ -54,15 +55,19 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: coworker-windows-amd64.exe
+            ext: .exe
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: coworker-linux-amd64
+            ext: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: coworker-macos-amd64
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: coworker-macos-arm64
+            ext: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,14 +78,11 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Rename artifact
         shell: bash
-        run: |
-          cd coworker/target/${{ matrix.target }}/release
-          src=$(ls coworker* | head -1)
-          cp "$src" "${{ matrix.artifact }}"
+        run: cp "coworker/target/${{ matrix.target }}/release/coworker${{ matrix.ext }}" "${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: coworker/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
 
   release:
     name: Create Release

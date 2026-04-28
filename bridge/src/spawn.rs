@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 pub struct AgentProcess {
     pub id: String,
@@ -9,6 +10,9 @@ pub struct AgentProcess {
     pty: Box<dyn MasterPty + Send>,
     pty_reader: Option<Box<dyn Read + Send>>,
     pty_writer: Option<Box<dyn Write + Send>>,
+    child: Arc<Mutex<Box<dyn Child + Send>>>,
+    /// Set to true when the PTY reader thread detects EOF / exit
+    exited: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentProcess {
@@ -84,6 +88,8 @@ impl AgentProcess {
             pty: pair.master,
             pty_reader: Some(Box::new(reader)),
             pty_writer: Some(writer),
+            child: Arc::new(Mutex::new(child)),
+            exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -106,17 +112,49 @@ impl AgentProcess {
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        // Send Ctrl+C (gentle termination via PTY)
-        if let Some(ref mut writer) = self.pty_writer {
-            let _ = writer.write_all(b"\x03");
-            let _ = writer.flush();
-        }
-        // Close PTY master to force SIGHUP on child if Ctrl+C is ignored
+        // Close PTY writer first to signal EOF
         self.pty_writer = None;
+
+        // Kill the entire process tree via the OS
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, use taskkill /T /F to kill the whole tree (cmd.exe → child → grandchild)
+            let pid = self.pid;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On Unix, kill the process group (negative PID sends to the whole group)
+            let pid = self.pid as i32;
+            if pid > 0 {
+                let _ = std::process::Command::new("kill")
+                    .arg(format!("-{}", pid))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+
+        // Also use portable-pty's kill as fallback
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+
+        self.exited.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.pty_reader.take()
+    /// Check if the child process has exited (read-only, uses atomic flag).
+    pub fn is_exited(&self) -> bool {
+        self.exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn take_reader(&mut self) -> Option<(Box<dyn Read + Send>, Arc<std::sync::atomic::AtomicBool>)> {
+        self.pty_reader.take().map(|r| (r, self.exited.clone()))
     }
 }

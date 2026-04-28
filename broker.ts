@@ -305,6 +305,7 @@ const landlordLastActivity = new Map<string, number>(); // landlordId → last m
 const LANDLORD_IDLE_TIMEOUT_MS = 30_000; // 30s — consider dead if no activity
 const landlordStats = new Map<string, { disk_free: number; ram_free: number; cpu_pct: number; ts: number }>();
 const landlordStatsBroadcast = new Map<string, number>(); // landlordId → last broadcast timestamp
+const landlordAgentIds = new Map<string, Set<string>>(); // landlordId → set of live agent IDs from landlord
 
 // --- Budget helpers ---
 
@@ -356,6 +357,7 @@ function broadcastBudgetUpdate() {
 // Terminal output buffer — stores all output per session for dashboard reconnect
 const terminalBuffers = new Map<string, string[]>(); // sessionId → hex-encoded chunks
 const TERMINAL_BUFFER_MAX_CHUNKS = 3000; // ~500 KB cap per session (each chunk ~160 bytes hex)
+const terminalLastOutput = new Map<string, number>(); // sessionId → timestamp of last terminal_output from landlord
 
 function pushToAgent(peerId: string, event: object): boolean {
   const ws = wsAgents.get(peerId);
@@ -430,10 +432,12 @@ setInterval(() => {
       wsLandlords.delete(bridgeId);
       landlordCwds.delete(bridgeId);
       landlordLastActivity.delete(bridgeId);
+      landlordAgentIds.delete(bridgeId);
       // Remove all agents belonging to this landlord
       const landlordAgents = (selectAllPeersAny.all() as Peer[]).filter(p => p.bridge_id === bridgeId);
       for (const agent of landlordAgents) {
         terminalBuffers.delete(agent.id);
+        terminalLastOutput.delete(agent.id);
         removePeer(agent.id);
         broadcast({ type: "agent_exited", session_id: agent.id });
       }
@@ -446,6 +450,7 @@ setInterval(() => {
       wsLandlords.delete(bridgeId);
       landlordCwds.delete(bridgeId);
       landlordLastActivity.delete(bridgeId);
+      landlordAgentIds.delete(bridgeId);
       broadcast({ type: "landlord_update", landlords: getLandlordList() });
     }
   }
@@ -473,6 +478,41 @@ function cleanStalePeers() {
     const peer = selectPeerById.get(id) as Peer | null;
     if (peer) broadcast({ type: "peer_updated", peer });
   }
+}
+
+// --- Zombie detection ---
+// Zombies are agents whose bridge_id points to a disconnected landlord,
+// OR agents whose landlord is connected but reports the agent is not running.
+
+function getZombieAgents(): Peer[] {
+  const allPeers = selectAllPeersAny.all() as Peer[];
+  return allPeers.filter(p => {
+    if (p.status === "offline" || p.status === "pending") return false;
+    if (!p.bridge_id || p.bridge_id === "") return false;
+    // Landlord disconnected → zombie
+    if (!wsLandlords.has(p.bridge_id)) return true;
+    // Landlord connected but doesn't report this agent → zombie
+    const liveIds = landlordAgentIds.get(p.bridge_id);
+    if (liveIds && liveIds.size > 0 && !liveIds.has(p.id)) return true;
+    return false;
+  });
+}
+
+function cleanupZombies(): { removed: string[] } {
+  const zombies = getZombieAgents();
+  const removed: string[] = [];
+  for (const z of zombies) {
+    terminalBuffers.delete(z.id);
+    terminalLastOutput.delete(z.id);
+    removePeer(z.id);
+    broadcast({ type: "agent_exited", session_id: z.id });
+    removed.push(z.id);
+  }
+  if (removed.length > 0) {
+    broadcastBudgetUpdate();
+    broadcast({ type: "landlord_update", landlords: getLandlordList() });
+  }
+  return { removed };
 }
 
 function removePeer(id: string) {
@@ -546,7 +586,50 @@ const deleteLandlord = db.prepare("DELETE FROM landlords WHERE id = ?");
 
 // Run initial cleanup now that all prepared statements are defined
 cleanStalePeers();
+cleanupZombies();
 setInterval(cleanStalePeers, 30_000);
+setInterval(() => { const r = cleanupZombies(); if (r.removed.length > 0) console.error(`[broker] Auto-cleaned ${r.removed.length} zombie agent(s)`); }, 30_000);
+
+// Detect stale terminals — agents that are approved with a bridge_id but haven't
+// received terminal output for 60s. The landlord should be sending output continuously.
+// This catches cases where the PTY reader thread died but the process still appears alive.
+function detectStaleTerminals() {
+  const now = Date.now();
+  const STALE_MS = 60_000; // 60 seconds without output
+  const allPeers = selectAllPeers.all() as Peer[];
+  for (const peer of allPeers) {
+    if (!peer.bridge_id || peer.bridge_id === "") continue;
+    const lastOutput = terminalLastOutput.get(peer.id);
+    // If we've never seen output for this agent, skip (just spawned)
+    if (!lastOutput) continue;
+    if (now - lastOutput > STALE_MS) {
+      console.error(`[broker] Stale terminal: ${peer.id} (${peer.name}) — no output for ${Math.round((now - lastOutput) / 1000)}s`);
+      // Ask the landlord if this agent is still alive
+      const liveIds = landlordAgentIds.get(peer.bridge_id);
+      if (liveIds && !liveIds.has(peer.id)) {
+        // Landlord says agent is not running — clean it up
+        console.error(`[broker] Stale terminal ${peer.id} confirmed dead by landlord — removing`);
+        terminalBuffers.delete(peer.id);
+        terminalLastOutput.delete(peer.id);
+        removePeer(peer.id);
+        broadcast({ type: "agent_exited", session_id: peer.id });
+      } else {
+        // Landlord thinks agent is alive but no output — notify dashboard
+        broadcast({ type: "terminal_stale", session_id: peer.id, stale_seconds: Math.round((now - lastOutput) / 1000) });
+        // If stale for more than 5 minutes, force kill
+        if (now - lastOutput > 300_000) {
+          console.error(`[broker] Stale terminal ${peer.id} exceeded 5 min — force killing`);
+          sendToLandlord(peer.bridge_id, { type: "kill_agent", session_id: peer.id });
+          terminalBuffers.delete(peer.id);
+          terminalLastOutput.delete(peer.id);
+          removePeer(peer.id);
+          broadcast({ type: "agent_exited", session_id: peer.id });
+        }
+      }
+    }
+  }
+}
+setInterval(detectStaleTerminals, 30_000);
 
 // --- Generate peer ID ---
 
@@ -1289,6 +1372,11 @@ Bun.serve({
       const body = await req.json() as { peer_id: string };
       if (!body.peer_id) return Response.json({ error: "peer_id required" }, { status: 400 });
       if (path === "/admin/kick-peer") return Response.json(handleLeaveChannel({ id: body.peer_id }));
+      // Kill the agent on its landlord before removing from DB
+      const peer = selectPeerById.get(body.peer_id) as Peer | null;
+      if (peer?.bridge_id) {
+        sendToLandlord(peer.bridge_id, { type: "kill_agent", session_id: body.peer_id });
+      }
       removePeer(body.peer_id);
       return Response.json({ ok: true });
     }
@@ -1320,6 +1408,27 @@ Bun.serve({
       return Response.json({ ok: true });
     }
 
+    // Check if an agent's process is still alive on its landlord
+    if (path === "/admin/check-agent") {
+      if (!isMasterKey(authHeader)) {
+        return Response.json({ error: "Master key required" }, { status: 403 });
+      }
+      const body = await req.json() as { peer_id: string };
+      if (!body.peer_id) return Response.json({ error: "peer_id required" }, { status: 400 });
+      const peer = selectPeerById.get(body.peer_id) as Peer | null;
+      if (!peer) return Response.json({ error: "Peer not found" }, { status: 404 });
+      if (!peer.bridge_id) return Response.json({ alive: false, reason: "no_bridge" });
+      const liveIds = landlordAgentIds.get(peer.bridge_id);
+      const alive = liveIds ? liveIds.has(body.peer_id) : false;
+      const lastOutput = terminalLastOutput.get(body.peer_id);
+      return Response.json({
+        alive,
+        bridge_id: peer.bridge_id,
+        landlord_connected: wsLandlords.has(peer.bridge_id),
+        last_output_ago_ms: lastOutput ? Date.now() - lastOutput : null,
+      });
+    }
+
     // Resync: ask a landlord (or all) to re-register running agents
     if (path === "/admin/resync") {
       if (!isMasterKey(authHeader)) {
@@ -1339,6 +1448,24 @@ Bun.serve({
         }
       }
       return Response.json({ ok: true, landlords: count });
+    }
+
+    // Zombie cleanup: remove agents whose landlord is disconnected
+    if (path === "/admin/cleanup-zombies") {
+      if (!isMasterKey(authHeader)) {
+        return Response.json({ error: "Master key required" }, { status: 403 });
+      }
+      const result = cleanupZombies();
+      return Response.json(result);
+    }
+
+    // List zombie agents (dry-run)
+    if (path === "/admin/zombies") {
+      if (!isMasterKey(authHeader)) {
+        return Response.json({ error: "Master key required" }, { status: 403 });
+      }
+      const zombies = getZombieAgents();
+      return Response.json({ zombies: zombies.map(z => ({ id: z.id, name: z.name, bridge_id: z.bridge_id, channel: z.channel })) });
     }
 
     // --- Budget endpoints ---
@@ -1390,7 +1517,7 @@ Bun.serve({
     }
 
     // Role management — master key only
-    if (path === "/add-channel-role" || path === "/remove-channel-role" || path === "/set-peer-role") {
+    if (path === "/add-channel-role" || path === "/remove-channel-role" || path === "/set-peer-role" || path === "/set-peer-channel") {
       if (!isMasterKey(authHeader)) {
         return Response.json({ error: "Master key required" }, { status: 403 });
       }
@@ -1427,6 +1554,27 @@ Bun.serve({
         broadcast({ type: "peer_updated", peer: updated });
         if (role) pushToAgent(peer_id, { type: "role_changed", role, channel: peer.channel });
         broadcastBudgetUpdate();
+        return Response.json({ ok: true });
+      }
+
+      if (path === "/set-peer-channel") {
+        const { peer_id, channel } = body;
+        if (!peer_id || !channel) return Response.json({ error: "peer_id and channel required" }, { status: 400 });
+        const peer = selectPeerById.get(peer_id) as Peer | null;
+        if (!peer) return Response.json({ error: "Peer not found" }, { status: 404 });
+        const name = sanitizeChannelName(channel);
+        if (name !== "main" && !selectChannelByName.get(name)) {
+          return Response.json({ error: `Channel #${name} does not exist` }, { status: 400 });
+        }
+        if (peer.channel === name) return Response.json({ ok: true });
+        const oldChannel = peer.channel;
+        updatePeerChannel.run(name, peer_id);
+        const { role } = pushChannelRole(peer_id, name);
+        const updated = selectPeerById.get(peer_id) as Peer;
+        upsertLastChannel.run(updated.hostname, updated.cwd, name);
+        broadcast({ type: "peer_updated", peer: updated });
+        pushToAgent(peer_id, { type: "channel_changed", channel: name, old_channel: oldChannel });
+        if (role) pushToAgent(peer_id, { type: "role_changed", role, channel: name });
         return Response.json({ ok: true });
       }
     }
@@ -1771,6 +1919,7 @@ case "/set-role": {
 
           // Terminal output from bridge → buffer + broadcast to dashboards
           if (payload.type === "terminal_output" && payload.session_id) {
+            terminalLastOutput.set(payload.session_id, Date.now());
             // Buffer for dashboard reconnects
             let buf = terminalBuffers.get(payload.session_id);
             if (!buf) { buf = []; terminalBuffers.set(payload.session_id, buf); }
@@ -1789,6 +1938,7 @@ case "/set-role": {
           // Agent exited (PTY closed)
           if (payload.type === "agent_exited" && payload.session_id) {
             terminalBuffers.delete(payload.session_id);
+            terminalLastOutput.delete(payload.session_id);
             removePeer(payload.session_id);
             broadcast({ type: "agent_exited", session_id: payload.session_id });
             console.error(`[broker] Landlord agent exited: ${payload.session_id}`);
@@ -1806,6 +1956,10 @@ case "/set-role": {
           if (payload.type === "system_stats") {
             const st = { disk_free: payload.disk_free ?? 0, ram_free: payload.ram_free ?? 0, cpu_pct: payload.cpu_pct ?? 0, ts: Date.now() };
             landlordStats.set(bridgeId, st);
+            // Track live agent IDs from landlord for zombie detection
+            if (Array.isArray(payload.agent_ids)) {
+              landlordAgentIds.set(bridgeId, new Set(payload.agent_ids as string[]));
+            }
             // Broadcast throttled: at most once per 15s per landlord
             const lastBroadcast = landlordStatsBroadcast.get(bridgeId) ?? 0;
             if (Date.now() - lastBroadcast > 15000) {
@@ -1826,6 +1980,7 @@ case "/set-role": {
         const peer = selectPeerById.get(peerId) as Peer | null;
         if (peer?.bridge_id) {
           terminalBuffers.delete(peerId);
+          terminalLastOutput.delete(peerId);
           broadcast({ type: "agent_exited", session_id: peerId });
         }
         console.error(`[broker] Agent WS disconnected: ${peerId} (${name})`);
@@ -1837,6 +1992,7 @@ case "/set-role": {
           landlordLastActivity.delete(bridgeId);
           landlordStats.delete(bridgeId);
           landlordStatsBroadcast.delete(bridgeId);
+          landlordAgentIds.delete(bridgeId);
           console.error(`[broker] Landlord WS disconnected: ${bridgeId}`);
           // Mark agents offline (don't remove — landlord may reconnect and reclaim them)
           const landlordAgents = (selectAllPeersAny.all() as Peer[]).filter(p => p.bridge_id === bridgeId && p.status === "approved");

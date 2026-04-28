@@ -960,7 +960,8 @@ const XTERM_THEME = {
 
 // --- Terminal Panel ---
 
-function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTerminalUnmount, onRename, draggable, onDragStart, onDragOver, hidden }: {
+<<<<<<< HEAD
+function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTerminalUnmount, onRename, draggable, onDragStart, onDragOver, hidden, stale }: {
   sessionId: string;
   name: string;
   ws: WebSocket | null;
@@ -971,7 +972,10 @@ function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTermin
   draggable?: boolean;
   onDragStart?: () => void;
   onDragOver?: (e: React.DragEvent) => void;
+<<<<<<< HEAD
   hidden?: boolean;
+  stale?: boolean;
+}
 }) {
   const termRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<TerminalPanelState | null>(null);
@@ -1091,7 +1095,7 @@ function TerminalPanel({ sessionId, name, ws, onClose, onTerminalReady, onTermin
         ) : (
           <span className="terminal-panel-name" onClick={startRename} title="Click to rename">{name}</span>
         )}
-        <span className="terminal-panel-status">connected</span>
+        <span className="terminal-panel-status" style={stale ? { color: "var(--orange)" } : undefined}>{stale ? "stale" : "connected"}</span>
         <button className="terminal-panel-close" onClick={onClose} title="Close terminal">&times;</button>
       </div>
       <div className="terminal-panel-term" ref={termRef} />
@@ -1296,6 +1300,8 @@ function Dashboard({ masterToken }: { masterToken: string }) {
   const outputBuffers = useRef<Record<string, string[]>>({});
   // Terminal instances — maps session_id to { term, fit }
   const terminalInstances = useRef<Record<string, { term: Terminal; fit: FitAddon }>>({});
+  // Stale terminals — session_id → seconds since last output
+  const staleTerminals = useRef<Map<string, number>>(new Map());
 
   // Tick every 2s to update activity bubbles and relative timestamps
   useEffect(() => {
@@ -1436,6 +1442,7 @@ function Dashboard({ masterToken }: { masterToken: string }) {
         ));
         break;
       case "terminal_output": {
+        staleTerminals.current.delete(event.session_id);
         const inst = terminalInstances.current[event.session_id];
         if (inst?.term) {
           // Flush any buffered output first
@@ -1470,6 +1477,10 @@ function Dashboard({ masterToken }: { masterToken: string }) {
         const exitedInst = terminalInstances.current[event.session_id];
         if (exitedInst) { exitedInst.term.dispose(); delete terminalInstances.current[event.session_id]; }
         delete outputBuffers.current[event.session_id];
+        staleTerminals.current.delete(event.session_id);
+        break;
+      case "terminal_stale":
+        staleTerminals.current.set(event.session_id, event.stale_seconds ?? 0);
         break;
       case "spawn_error":
         setSpawnError(event.error);
@@ -1719,10 +1730,35 @@ function Dashboard({ masterToken }: { masterToken: string }) {
                 const peer = peers.find((p) => p.id === sessionId);
                 const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
                 const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
+                const staleSec = staleTerminals.current.get(sessionId);
+                const isStale = staleSec != null && staleSec > 0;
                 return (
-                  <div key={sessionId} className="sidebar-terminal-item">
-                    <span className="sidebar-terminal-dot" />
-                    <span className="sidebar-terminal-name">{terminalNames[sessionId] ?? peer?.name ?? sessionId}{landlordLabel}</span>
+                  <div key={sessionId} className="sidebar-terminal-item" style={isStale ? { opacity: 0.6 } : undefined}>
+                    <span className="sidebar-terminal-dot" style={isStale ? { background: "var(--orange)" } : undefined} />
+                    <span className="sidebar-terminal-name" title={isStale ? `No output for ${staleSec}s` : undefined}>
+                      {terminalNames[sessionId] ?? peer?.name ?? sessionId}{landlordLabel}
+                      {isStale && <span style={{ color: "var(--orange)", fontSize: "0.8em", marginLeft: 4 }}>stale</span>}
+                    </span>
+                    {isStale && (
+                      <button className="sidebar-terminal-kill" style={{ color: "var(--green)", fontSize: "0.9em" }}
+                        onClick={async () => {
+                          // Check if agent is still alive
+                          const res = await fetch(`/admin/check-agent`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", Authorization: `Bearer ${masterToken}` },
+                            body: JSON.stringify({ peer_id: sessionId }),
+                          });
+                          const info = await res.json();
+                          if (info.alive) {
+                            staleTerminals.current.delete(sessionId);
+                            // Force a re-render by nudging tick
+                            setTick((n) => n + 1);
+                          } else {
+                            // Agent is dead — kill it
+                            handleKillTerminal(sessionId);
+                          }
+                        }} title="Check if alive">&#8635;</button>
+                    )}
                     <button className="sidebar-terminal-kill" onClick={() => handleKillTerminal(sessionId)} title="Kill">&times;</button>
                   </div>
                 );
@@ -1771,6 +1807,15 @@ function Dashboard({ masterToken }: { masterToken: string }) {
                     body: JSON.stringify({}),
                   });
                 }} title="Reconnect all terminals from landlords">Resync</button>
+                <button className="btn" onClick={async () => {
+                  const res = await fetch("/admin/cleanup-zombies", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${masterToken}` },
+                  });
+                  const data = await res.json();
+                  if (data.removed?.length > 0) alert(`Cleaned ${data.removed.length} zombie agent(s)`);
+                  else alert("No zombies found");
+                }} title="Remove agents whose landlord is disconnected">Clean Zombies</button>
                 <button className="btn btn-spawn" onClick={() => setShowSpawnDialog(true)} title="Hire a worker on a landlord">+ Hire Worker</button>
               </>
             )}
@@ -1906,6 +1951,7 @@ function Dashboard({ masterToken }: { masterToken: string }) {
             <div className={`terminal-area terminal-${terminalViewMode}`}>
               {channelTerminalIds.length === 0 ? (
                 <div className="empty">No active terminals. Click + Hire Worker to hire an agent.</div>
+<<<<<<< HEAD
               ) : channelTerminalIds.map((sessionId) => {
                 const peer = peers.find((p) => p.id === sessionId);
                 const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
@@ -1928,6 +1974,70 @@ function Dashboard({ masterToken }: { masterToken: string }) {
                   />
                 );
               })}
+            ) : terminalViewMode === "tab" ? (
+              // Tab mode: only render active terminal, full height
+              activeTerminalId && (() => {
+                const peer = peers.find((p) => p.id === activeTerminalId);
+                const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
+                const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
+                return (
+                  <TerminalPanel
+                    key={activeTerminalId}
+                    sessionId={activeTerminalId}
+                    name={`${terminalNames[activeTerminalId] ?? peer?.name ?? activeTerminalId}${landlordLabel}`}
+                    ws={wsRef.current}
+                    onClose={() => handleKillTerminal(activeTerminalId)}
+                    onTerminalReady={handleTerminalReady}
+                    onTerminalUnmount={handleTerminalUnmount}
+                    onRename={handleRenameTerminal}
+                    stale={staleTerminals.current.has(activeTerminalId)}
+                  />
+                );
+              })()
+                // Tab mode: only render active terminal, full height
+                activeTerminalId && (() => {
+                  const peer = peers.find((p) => p.id === activeTerminalId);
+                  const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
+                  const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
+                  return (
+                    <TerminalPanel
+                      key={activeTerminalId}
+                      sessionId={activeTerminalId}
+                      name={`${terminalNames[activeTerminalId] ?? peer?.name ?? activeTerminalId}${landlordLabel}`}
+                      ws={wsRef.current}
+                      onClose={() => handleKillTerminal(activeTerminalId)}
+                      onTerminalReady={handleTerminalReady}
+                      onTerminalUnmount={handleTerminalUnmount}
+                      onRename={handleRenameTerminal}
+                      stale={staleTerminals.current.has(activeTerminalId)}
+                    />
+                  );
+                })()
+              ) : (
+                // Grid mode: render all terminals in scrollable grid
+                channelTerminalIds.map((sessionId) => {
+                  const peer = peers.find((p) => p.id === sessionId);
+                  const landlord = peer?.bridge_id ? landlords.find((l) => l.id === peer.bridge_id) : null;
+                  const landlordLabel = landlord ? ` (${landlord.hostname || landlord.id})` : "";
+                  return (
+                    <TerminalPanel
+                      key={sessionId}
+                      sessionId={sessionId}
+                      name={`${terminalNames[sessionId] ?? peer?.name ?? sessionId}${landlordLabel}`}
+                      ws={wsRef.current}
+                      onClose={() => handleKillTerminal(sessionId)}
+                      onTerminalReady={handleTerminalReady}
+                      onTerminalUnmount={handleTerminalUnmount}
+                      onRename={handleRenameTerminal}
+                      stale={staleTerminals.current.has(sessionId)}
+                      draggable
+                      onDragStart={() => handleTerminalDragStart(sessionId)}
+                      onDragOver={(e) => handleTerminalDragOver(e, sessionId)}
+                    />
+                  );
+                })
+              )}
+>>>>>>> origin/hydra
             </div>
           </div>
         </div>

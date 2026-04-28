@@ -26,3 +26,11 @@ pub fn collect() -> Value {
         "disk_free": disk_free
     })
 }
+
+pub fn collect_with_agents(agent_ids: &[String]) -> Value {
+    let mut stats = collect();
+    if let Some(obj) = stats.as_object_mut() {
+        obj.insert("agent_ids".to_string(), json!(agent_ids));
+    }
+    stats
+}

@@ -68,7 +68,7 @@ impl AgentManager {
         drop(tx);
 
         // Start forwarding PTY output to broker in a background thread
-        if let Some(reader) = agent.take_reader() {
+        if let Some((reader, exited)) = agent.take_reader() {
             let session_id = id.clone();
             let sender_ref = self.sender_ref.clone();
             let rt = tokio::runtime::Handle::current();
@@ -105,6 +105,8 @@ impl AgentManager {
                         Err(_) => break,
                     }
                 }
+                // Mark as exited
+                exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 // Notify broker that agent exited
                 let exit_msg = serde_json::json!({
                     "type": "agent_exited",
@@ -124,7 +126,11 @@ impl AgentManager {
     }
 
     /// Re-register all running agents with the broker after reconnect.
-    pub async fn re_register_all(&self) {
+    /// Skips agents whose process has exited.
+    pub async fn re_register_all(&mut self) {
+        if self.agents.is_empty() { return; }
+        // Clean up dead agents first
+        self.cleanup_dead();
         if self.agents.is_empty() { return; }
         println!("Re-registering {} running agent(s)...", self.agents.len());
         for (id, agent) in &self.agents {
@@ -164,6 +170,24 @@ impl AgentManager {
         for (id, agent) in &self.agents {
             println!("  {}  pid={}  cmd={}", id, agent.pid, agent.cmd);
         }
+    }
+
+    /// Remove agents whose PTY reader threads have reported exit.
+    pub fn cleanup_dead(&mut self) -> Vec<String> {
+        let dead: Vec<String> = self.agents.iter()
+            .filter(|(_, agent)| agent.is_exited())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dead {
+            self.agents.remove(id);
+            println!("Cleaned up dead agent: {}", id);
+        }
+        dead
+    }
+
+    /// Check if an agent is still running.
+    pub fn is_agent_alive(&self, id: &str) -> bool {
+        self.agents.get(id).map_or(false, |a| !a.is_exited())
     }
 
     pub async fn shutdown(&mut self) {
